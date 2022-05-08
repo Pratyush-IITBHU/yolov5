@@ -27,6 +27,7 @@ Usage - formats:
 import argparse
 import os
 import sys
+import numpy as np
 from pathlib import Path
 
 import torch
@@ -48,7 +49,7 @@ from utils.torch_utils import select_device, time_sync
 
 @torch.no_grad()
 def run(
-        weights=ROOT / 'yolov5s.pt',  # model.pt path(s)
+        weights=ROOT / 'best-solar.pt',  # model.pt path(s)
         source=ROOT / 'data/images',  # file/dir/URL/glob, 0 for webcam
         data=ROOT / 'data/coco128.yaml',  # dataset.yaml path
         imgsz=(640, 640),  # inference size (height, width)
@@ -56,7 +57,7 @@ def run(
         iou_thres=0.45,  # NMS IOU threshold
         max_det=1000,  # maximum detections per image
         device='',  # cuda device, i.e. 0 or 0,1,2,3 or cpu
-        view_img=False,  # show results
+        view_img=True,  # show results
         save_txt=False,  # save results to *.txt
         save_conf=False,  # save confidences in --save-txt labels
         save_crop=False,  # save cropped prediction boxes
@@ -92,6 +93,14 @@ def run(
     model = DetectMultiBackend(weights, device=device, dnn=dnn, data=data, fp16=half)
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
+
+    weights_fault = "best.pt"
+    model_fault = DetectMultiBackend(weights_fault, device=device, dnn=dnn, data=data, fp16=half)
+    stride_fault, names_fault, pt_fault = model_fault.stride, model_fault.names, model_fault.pt
+
+    weights_single = "best-singlemodule.pt"
+    model_single = DetectMultiBackend(weights_single, device=device, dnn=dnn, data=data, fp16=half)
+    stride_single, names_single, pt_single = model_single.stride, model_single.names, model_single.pt
 
     # Dataloader
     if webcam:
@@ -130,6 +139,9 @@ def run(
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
+        pred_full_solar_modules = []
+        prob_full_solar_modules = []
+
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
@@ -146,11 +158,9 @@ def run(
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            print(det)
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
-                print(det)
 
                 # Print results
                 for c in det[:, -1].unique():
@@ -159,7 +169,15 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-                    print(xyxy)
+                    x1 = xyxy[0].detach().cpu().clone().numpy()
+                    y1 = xyxy[1].detach().cpu().clone().numpy()
+                    x2 = xyxy[2].detach().cpu().clone().numpy()
+                    y2 = xyxy[3].detach().cpu().clone().numpy()
+                    prob= conf.detach().cpu().clone().numpy().item()
+                    # print(x1.ndim)
+                    pred_full_solar_modules.append([float(x1), float(y1), float(x2), float(y2)])
+                    prob_full_solar_modules.append(prob)
+                    
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -179,6 +197,180 @@ def run(
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(0)  # 1 millisecond
                 cv2.destroyAllWindows()
+
+        pred = model_fault(im, augment=augment, visualize=visualize)
+        t3 = time_sync()
+        dt[1] += t3 - t2
+
+        # NMS
+        pred = non_max_suppression(pred, 0.01, 0.01, None, False, max_det=max_det)
+        dt[2] += time_sync() - t3
+
+        # Second-stage classifier (optional)
+        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+
+        pred_fault_solar_modules = []
+        prob_fault_solar_modules = []
+
+        # Process predictions
+        for i, det in enumerate(pred):  # per image
+            seen += 1
+            if webcam:  # batch_size >= 1
+                p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                s += f'{i}: '
+            else:
+                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+
+            p = Path(p)  # to Path
+            save_path = str(save_dir / p.name)  # im.jpg
+            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+            s += '%gx%g ' % im.shape[2:]  # print string
+            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+            imc = im0.copy() if save_crop else im0  # for save_crop
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                for *xyxy, conf, cls in reversed(det):
+                    x1 = xyxy[0].detach().cpu().clone().numpy()
+                    y1 = xyxy[1].detach().cpu().clone().numpy()
+                    x2 = xyxy[2].detach().cpu().clone().numpy()
+                    y2 = xyxy[3].detach().cpu().clone().numpy()
+                    prob= conf.detach().cpu().clone().numpy().item()
+                    pred_fault_solar_modules.append([float(x1), float(y1), float(x2), float(y2)])
+                    prob_fault_solar_modules.append(prob)
+                    if save_txt:  # Write to file
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                        with open(txt_path + '.txt', 'a') as f:
+                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                    if save_img or save_crop or view_img:  # Add bbox to image
+                        c = int(cls)  # integer class
+                        label = f' {conf:.2f}'
+                        annotator.box_label(xyxy, label, color=colors(c, True))
+                        if save_crop:
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+
+
+        pred = model_single(im, augment=augment, visualize=visualize)
+        t3 = time_sync()
+        dt[1] += t3 - t2
+
+        pred = model_single(im, augment=augment, visualize=visualize)
+        t3 = time_sync()
+        dt[1] += t3 - t2
+        
+        # NMS
+        pred = non_max_suppression(pred, 0.01, 0.01, None, False, max_det=max_det)
+        dt[2] += time_sync() - t3
+
+        # Second-stage classifier (optional)
+        # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
+
+        pred_single_solar_modules = []
+        prob_single_solar_modules = []
+        # Process predictions
+        for i, det in enumerate(pred):  # per image
+            seen += 1
+            if webcam:  # batch_size >= 1
+                p, im0, frame = path[i], im0s[i].copy(), dataset.count
+                s += f'{i}: '
+            else:
+                p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+
+            p = Path(p)  # to Path
+            save_path = str(save_dir / p.name)  # im.jpg
+            txt_path = str(save_dir / 'labels' / p.stem) + ('' if dataset.mode == 'image' else f'_{frame}')  # im.txt
+            s += '%gx%g ' % im.shape[2:]  # print string
+            gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
+            imc = im0.copy() if save_crop else im0  # for save_crop
+            annotator = Annotator(im0, line_width=line_thickness, example=str(names))
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                for *xyxy, conf, cls in reversed(det):
+                    x1 = xyxy[0].detach().cpu().clone().numpy()
+                    y1 = xyxy[1].detach().cpu().clone().numpy()
+                    x2 = xyxy[2].detach().cpu().clone().numpy()
+                    y2 = xyxy[3].detach().cpu().clone().numpy()
+                    prob= conf.detach().cpu().clone().numpy().item()
+                    pred_single_solar_modules.append([float(x1), float(y1), float(x2), float(y2)])
+                    prob_single_solar_modules.append(prob)
+                    
+                    if save_txt:  # Write to file
+                        xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
+                        line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
+                        with open(txt_path + '.txt', 'a') as f:
+                            f.write(('%g ' * len(line)).rstrip() % line + '\n')
+
+                    if save_img or save_crop or view_img:  # Add bbox to image
+                        c = int(cls)  # integer class
+                        label = f' {conf:.2f}'
+                        annotator.box_label(xyxy, label, color=colors(c, True))
+                        if save_crop:
+                            save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
+
+            
+            pred_single_solar_modules.sort()
+            pred_full_solar_modules.sort()
+            im0 = annotator.result()
+            for im in range(len(pred_full_solar_modules)):
+                img = cv2.imread(path)
+                temp , temp2  = img , img
+                for j in range(1000):
+                    cv2.imshow("output", np.array(temp, dtype = np.uint8 ))
+                # adding filled rectangle on each frame
+                print(path,(int(pred_full_solar_modules[im][0]),int(pred_full_solar_modules[im][1])), (int(pred_full_solar_modules[im][2]),int(pred_full_solar_modules[im][3])))
+                cv2.rectangle(temp, (int(pred_full_solar_modules[im][0]),int(pred_full_solar_modules[im][1])), (int(pred_full_solar_modules[im][2]),int(pred_full_solar_modules[im][3])),(0, 255, 0), 5)
+                for k in range(10000):
+                    cv2.imshow("output", temp)
+                
+                for m in range(len(pred_single_solar_modules)):
+                    mid_point_x,mid_point_y = (pred_single_solar_modules[m][0]+pred_single_solar_modules[m][2])/2 , (pred_single_solar_modules[m][1]+pred_single_solar_modules[m][3])/2
+                    if((mid_point_x > pred_full_solar_modules[im][0]) and (mid_point_x < pred_full_solar_modules[im][2]) and mid_point_y > pred_full_solar_modules[im][1] and mid_point_y < pred_full_solar_modules[im][3]):
+                        cv2.rectangle(temp,  (int(pred_single_solar_modules[m][0]),int(pred_single_solar_modules[m][1])), (int(pred_single_solar_modules[m][2]),int(pred_single_solar_modules[m][3])),( 255 , 0 , 0 ),2)
+                        for i in range(10000):
+                            cv2.imshow("output", temp)
+
+                        if cv2.waitKey(1) & 0xFF == ord('s'):
+                            break
+                
+                for ml in range(len(pred_fault_solar_modules)):
+                    mid_point_fault_x,mid_point_fault_y = (pred_fault_solar_modules[ml][0]+pred_fault_solar_modules[ml][2])/2 , (pred_fault_solar_modules[ml][1]+pred_fault_solar_modules[ml][3])/2
+                    if((mid_point_fault_x > pred_full_solar_modules[im][0]) and (mid_point_fault_x < pred_full_solar_modules[im][2]) and mid_point_fault_y > pred_full_solar_modules[im][1] and mid_point_fault_y < pred_full_solar_modules[im][3]):
+                        cv2.rectangle(temp2, (int(pred_full_solar_modules[im][0]),int(pred_full_solar_modules[im][1])), (int(pred_full_solar_modules[im][2]),int(pred_full_solar_modules[im][3])),(0, 0, 255), -1)
+                        cv2.rectangle(temp2, (int(pred_fault_solar_modules[ml][0]),int(pred_fault_solar_modules[ml][1])), (int(pred_fault_solar_modules[ml][2]),int(pred_fault_solar_modules[ml][3])),(255, 255, 0), 5)
+                        #cv2.putText(temp,str(prob_fault_solar_modules[ml]),(pred_fault_solar_modules[ml][0]-1,pred_fault_solar_modules[ml][1]-1),cv2.FONT_HERSHEY_COMPLEX, 1 , color=(255,0,0),thickness=1)
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        org = (int(pred_fault_solar_modules[ml][0])-30,int(pred_fault_solar_modules[ml][1])-1)
+                        fontScale = 1
+                        color = (255, 0, 0)
+                        thickness = 2
+                        cv2.putText(temp2, str((int(prob_fault_solar_modules[ml]*10000))/100) + "%", org, font, fontScale, color, thickness, cv2.LINE_AA)
+                        for k in range(10000):
+                            cv2.imshow("output", temp2)
+                            
+                if cv2.waitKey(1) & 0xFF == ord('s'):
+                    break
+
+                
+            
+                # cv2.destroyAllWindows()
 
             # Save results (image with detections)
             if save_img:
@@ -214,8 +406,8 @@ def run(
 
 def parse_opt():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'yolov5s.pt', help='model path(s)')
-    parser.add_argument('--source', type=str, default=ROOT / 'data/images', help='file/dir/URL/glob, 0 for webcam')
+    parser.add_argument('--weights', nargs='+', type=str, default=ROOT / 'best-solar.pt', help='model path(s)')
+    parser.add_argument('--source', type=str, default=ROOT / 'false_color/', help='file/dir/URL/glob, 0 for webcam')
     parser.add_argument('--data', type=str, default=ROOT / 'data.yaml', help='(optional) dataset.yaml path')
     parser.add_argument('--imgsz', '--img', '--img-size', nargs='+', type=int, default=[640], help='inference size h,w')
     parser.add_argument('--conf-thres', type=float, default=0.25, help='confidence threshold')

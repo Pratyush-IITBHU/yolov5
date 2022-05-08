@@ -1,29 +1,3 @@
-# YOLOv5 🚀 by Ultralytics, GPL-3.0 license
-"""
-Run inference on images, videos, directories, streams, etc.
-
-Usage - sources:
-    $ python path/to/detect.py --weights yolov5s.pt --source 0              # webcam
-                                                             img.jpg        # image
-                                                             vid.mp4        # video
-                                                             path/          # directory
-                                                             path/*.jpg     # glob
-                                                             'https://youtu.be/Zgi9g1ksQHc'  # YouTube
-                                                             'rtsp://example.com/media.mp4'  # RTSP, RTMP, HTTP stream
-
-Usage - formats:
-    $ python path/to/detect.py --weights yolov5s.pt                 # PyTorch
-                                         yolov5s.torchscript        # TorchScript
-                                         yolov5s.onnx               # ONNX Runtime or OpenCV DNN with --dnn
-                                         yolov5s.xml                # OpenVINO
-                                         yolov5s.engine             # TensorRT
-                                         yolov5s.mlmodel            # CoreML (macOS-only)
-                                         yolov5s_saved_model        # TensorFlow SavedModel
-                                         yolov5s.pb                 # TensorFlow GraphDef
-                                         yolov5s.tflite             # TensorFlow Lite
-                                         yolov5s_edgetpu.tflite     # TensorFlow Edge TPU
-"""
-
 import argparse
 import os
 import sys
@@ -93,6 +67,11 @@ def run(
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
+    weights_fault = "best.pt"
+
+    model_fault = DetectMultiBackend(weights_fault, device=device, dnn=dnn, data=data, fp16=half)
+    stride_fault, names_fault, pt_fault = model_fault.stride, model_fault.names, model_fault.pt
+
     # Dataloader
     if webcam:
         view_img = check_imshow()
@@ -130,6 +109,9 @@ def run(
         # Second-stage classifier (optional)
         # pred = utils.general.apply_classifier(pred, classifier_model, im, im0s)
 
+        pred_fault = model_fault(im, augment=augment, visualize=visualize)
+        pred_fault = non_max_suppression(pred_fault, 0.01, iou_thres, None, False, max_det=max_det)
+
         # Process predictions
         for i, det in enumerate(pred):  # per image
             seen += 1
@@ -145,12 +127,11 @@ def run(
             s += '%gx%g ' % im.shape[2:]  # print string
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
+            image = im0.copy()
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            print(det)
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
-                print(det)
 
                 # Print results
                 for c in det[:, -1].unique():
@@ -159,7 +140,6 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-                    print(xyxy)
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -179,6 +159,27 @@ def run(
                 cv2.imshow(str(p), im0)
                 cv2.waitKey(0)  # 1 millisecond
                 cv2.destroyAllWindows()
+
+            
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                det_numpy = det.detach().cpu().clone().numpy()
+                print(det_numpy)
+                for *xyxy, conf, cls in reversed(det):
+                    crop = save_one_box(xyxy, imc, save=False)
+                    for i_fault, det_fault in enumerate(pred_fault):
+                        if len(det_fault):
+                            annotator = Annotator(im0, line_width=line_thickness, example=str(names_fault))
+                            det_fault[:, :4] = scale_coords(im.shape[2:], det_fault[:, :4], im0.shape).round()
+
 
             # Save results (image with detections)
             if save_img:

@@ -44,7 +44,39 @@ from utils.general import (LOGGER, check_file, check_img_size, check_imshow, che
                            increment_path, non_max_suppression, print_args, scale_coords, strip_optimizer, xyxy2xywh)
 from utils.plots import Annotator, colors, save_one_box
 from utils.torch_utils import select_device, time_sync
+import numpy as np
 
+def letterbox(im, new_shape=(640, 640), color=(114, 114, 114), auto=True, scaleFill=False, scaleup=True, stride=32):
+    # Resize and pad image while meeting stride-multiple constraints
+    shape = im.shape[:2]  # current shape [height, width]
+    if isinstance(new_shape, int):
+        new_shape = (new_shape, new_shape)
+
+    # Scale ratio (new / old)
+    r = min(new_shape[0] / shape[0], new_shape[1] / shape[1])
+    if not scaleup:  # only scale down, do not scale up (for better val mAP)
+        r = min(r, 1.0)
+
+    # Compute padding
+    ratio = r, r  # width, height ratios
+    new_unpad = int(round(shape[1] * r)), int(round(shape[0] * r))
+    dw, dh = new_shape[1] - new_unpad[0], new_shape[0] - new_unpad[1]  # wh padding
+    if auto:  # minimum rectangle
+        dw, dh = np.mod(dw, stride), np.mod(dh, stride)  # wh padding
+    elif scaleFill:  # stretch
+        dw, dh = 0.0, 0.0
+        new_unpad = (new_shape[1], new_shape[0])
+        ratio = new_shape[1] / shape[1], new_shape[0] / shape[0]  # width, height ratios
+
+    dw /= 2  # divide padding into 2 sides
+    dh /= 2
+
+    if shape[::-1] != new_unpad:  # resize
+        im = cv2.resize(im, new_unpad, interpolation=cv2.INTER_LINEAR)
+    top, bottom = int(round(dh - 0.1)), int(round(dh + 0.1))
+    left, right = int(round(dw - 0.1)), int(round(dw + 0.1))
+    im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=color)  # add border
+    return im, ratio, (dw, dh)
 
 @torch.no_grad()
 def run(
@@ -93,6 +125,11 @@ def run(
     stride, names, pt = model.stride, model.names, model.pt
     imgsz = check_img_size(imgsz, s=stride)  # check image size
 
+    weights_fault = "best-singlemodule.pt"
+
+    model_fault = DetectMultiBackend(weights_fault, device=device, dnn=dnn, data=data, fp16=half)
+    stride_fault, names_fault, pt_fault = model_fault.stride, model_fault.names, model_fault.pt
+
     # Dataloader
     if webcam:
         view_img = check_imshow()
@@ -106,6 +143,7 @@ def run(
 
     # Run inference
     model.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
+    model_fault.warmup(imgsz=(1 if pt else bs, 3, *imgsz))  # warmup
     dt, seen = [0.0, 0.0, 0.0], 0
     for path, im, im0s, vid_cap, s in dataset:
         t1 = time_sync()
@@ -146,11 +184,9 @@ def run(
             gn = torch.tensor(im0.shape)[[1, 0, 1, 0]]  # normalization gain whwh
             imc = im0.copy() if save_crop else im0  # for save_crop
             annotator = Annotator(im0, line_width=line_thickness, example=str(names))
-            print(det)
             if len(det):
                 # Rescale boxes from img_size to im0 size
                 det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
-                print(det)
 
                 # Print results
                 for c in det[:, -1].unique():
@@ -159,7 +195,6 @@ def run(
 
                 # Write results
                 for *xyxy, conf, cls in reversed(det):
-                    print(xyxy)
                     if save_txt:  # Write to file
                         xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn).view(-1).tolist()  # normalized xywh
                         line = (cls, *xywh, conf) if save_conf else (cls, *xywh)  # label format
@@ -168,7 +203,7 @@ def run(
 
                     if save_img or save_crop or view_img:  # Add bbox to image
                         c = int(cls)  # integer class
-                        label = f' {conf:.2f}'
+                        label = None
                         annotator.box_label(xyxy, label, color=colors(c, True))
                         if save_crop:
                             save_one_box(xyxy, imc, file=save_dir / 'crops' / names[c] / f'{p.stem}.jpg', BGR=True)
@@ -177,8 +212,54 @@ def run(
             im0 = annotator.result()
             if view_img:
                 cv2.imshow(str(p), im0)
-                cv2.waitKey(0)  # 1 millisecond
-                cv2.destroyAllWindows()
+                # cv2.waitKey(0)  # 1 millisecond
+                # cv2.destroyAllWindows()
+
+            if len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+
+                # Print results
+                for c in det[:, -1].unique():
+                    n = (det[:, -1] == c).sum()  # detections per class
+                    s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                # Write results
+                for *xyxy, conf, cls in reversed(det):
+                    crop = save_one_box(xyxy, imc, save=False)
+                    crop = cv2.cvtColor(crop, cv2.COLOR_RGB2BGR)
+                    im_fault = crop.copy()
+                    im_fault, _, _ = letterbox(im_fault)
+                    im_fault = im_fault.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+                    im_fault = np.ascontiguousarray(im_fault)
+                    im_fault = torch.from_numpy(im_fault).to(device)
+                    im_fault = im_fault.half() if model.fp16 else im_fault.float()  # uint8 to fp16/32
+                    im_fault /= 255  # 0 - 255 to 0.0 - 1.0
+                    if len(im_fault.shape) == 3:
+                        im_fault = im_fault[None]  # expand for batch dim
+                    pred_fault = model_fault(im_fault, augment=False, visualize=False)
+                    pred_fault = non_max_suppression(pred_fault, 0.01, 0.01, None, False)
+                    for i_fault, det_fault in enumerate(pred_fault):
+                        im0_fault = crop.copy()
+                        print(det_fault)
+                        gn_fault = torch.tensor(im0_fault.shape)[[1, 0, 1, 0]]
+                        annotator = Annotator(im0_fault, line_width=3, example=str(names_fault))
+                        if len(det_fault):
+                            det_fault[:, :4] = scale_coords(im_fault.shape[2:], det_fault[:, :4], im0_fault.shape).round()
+                            for *xyxy, conf, cls in reversed(det_fault):
+                                xywh = (xyxy2xywh(torch.tensor(xyxy).view(1, 4)) / gn_fault).view(-1).tolist()
+                                c = int(cls)  # integer class
+                                label =  None
+                                annotator.box_label(xyxy, label, color=colors(c, True))
+                        # cv2.imshow("before", im0_fault)
+                        im0_fault = annotator.result()
+                        # im0_fault = cv2.cvtColor(im0_fault, cv2.COLOR_RGB2BGR)
+                        
+                        cv2.imshow("crop", crop)
+                        cv2.imshow("im0_fault", im0_fault)
+                        cv2.waitKey(1000)
+
+            cv2.destroyAllWindows()
 
             # Save results (image with detections)
             if save_img:
@@ -254,3 +335,5 @@ def main(opt):
 if __name__ == "__main__":
     opt = parse_opt()
     main(opt)
+
+
