@@ -99,11 +99,11 @@ class Loggers():
         if self.wandb:
             self.wandb.log({"Labels": [wandb.Image(str(x), caption=x.name) for x in paths]})
 
-    def on_train_batch_end(self, ni, model, imgs, targets, paths, plots, sync_bn):
+    def on_train_batch_end(self, ni, model, imgs, targets, paths, plots):
         # Callback runs on train batch end
         if plots:
             if ni == 0:
-                if not sync_bn:  # tb.add_graph() --sync known issue https://github.com/ultralytics/yolov5/issues/3754
+                if not self.opt.sync_bn:  # --sync known issue https://github.com/ultralytics/yolov5/issues/3754
                     with warnings.catch_warnings():
                         warnings.simplefilter('ignore')  # suppress jit trace warning
                         self.tb.add_graph(torch.jit.trace(de_parallel(model), imgs[0:1], strict=False), [])
@@ -164,6 +164,7 @@ class Loggers():
             plot_results(file=self.save_dir / 'results.csv')  # save results.png
         files = ['results.png', 'confusion_matrix.png', *(f'{x}_curve.png' for x in ('F1', 'PR', 'P', 'R'))]
         files = [(self.save_dir / f) for f in files if (self.save_dir / f).exists()]  # filter
+        self.logger.info(f"Results saved to {colorstr('bold', self.save_dir)}")
 
         if self.tb:
             for f in files:
